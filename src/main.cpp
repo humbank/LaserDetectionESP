@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <ArduinoJson.h>
 
 #define LASER_PIN 26
 #define SENSOR_PIN 34
@@ -7,12 +8,15 @@
 #define RXD2 16
 #define TXD2 17
 
+#define DEVICE_ID 1
+
 HardwareSerial RS485(2);
 
 int ambient = 0;
 int laserHit = 0;
 bool running = false;
 
+//sensor
 int readSensor() {
   return analogRead(SENSOR_PIN);
 }
@@ -26,30 +30,43 @@ int averageRead(int samples) {
   return sum / samples;
 }
 
-// ---------------- CALIBRATION ----------------
-void calibrate() {
-  RS485.println("FROM:1:CALIBRATING");
+//json send helpelrs
+void sendEvent(const char* event, int value = 0) {
+  StaticJsonDocument<128> doc;
 
-  // laser OFF during ambient measurement
+  doc["id"] = DEVICE_ID;
+  doc["event"] = event;
+  doc["value"] = value;
+
+  serializeJson(doc, RS485);
+  RS485.print("\n");
+}
+
+//calibratee
+void calibrate() {
+
+  sendEvent("calibrating", 1);
+
   digitalWrite(LASER_PIN, LOW);
   delay(1000);
   ambient = averageRead(50);
 
-  // laser ON for hit measurement
   digitalWrite(LASER_PIN, HIGH);
   delay(1500);
   laserHit = averageRead(50);
 
-  RS485.print("FROM:1:CAL_DONE:");
-  RS485.print(ambient);
-  RS485.print(":");
-  RS485.println(laserHit);
-
-  // IMPORTANT: always turn laser OFF at end
   digitalWrite(LASER_PIN, LOW);
+
+  StaticJsonDocument<128> doc;
+  doc["id"] = DEVICE_ID;
+  doc["event"] = "calibrate_done";
+  doc["ambient"] = ambient;
+  doc["laser"] = laserHit;
+
+  serializeJson(doc, RS485);
+  RS485.print("\n");
 }
 
-// ---------------- BEAM CHECK ----------------
 bool beam() {
   int value = averageRead(5);
 
@@ -59,7 +76,7 @@ bool beam() {
   return !(deviation >= tolerance);
 }
 
-// ---------------- SETUP ----------------
+
 void setup() {
   Serial.begin(115200);
   RS485.begin(115200, SERIAL_8N1, RXD2, TXD2);
@@ -67,49 +84,60 @@ void setup() {
   pinMode(LASER_PIN, OUTPUT);
   pinMode(LED_BUILTIN, OUTPUT);
 
-  digitalWrite(LASER_PIN, LOW); // SAFE DEFAULT
+  digitalWrite(LASER_PIN, LOW);
 }
 
-// ---------------- LOOP ----------------
+
 void loop() {
 
-  // ----------- COMMAND HANDLING -----------
+  //input parsing
   if (RS485.available()) {
-    String cmd = RS485.readStringUntil('\n');
-    cmd.trim();
 
-    if (cmd == "1:CALIBRATE_LASER") {
-      calibrate();
-      running = false;
-    }
+    String line = RS485.readStringUntil('\n');
+    line.trim();
 
-    if (cmd == "1:START_LASER") {
-      running = true;
-      RS485.println("FROM:1:RUNNING");
-    }
+    StaticJsonDocument<128> doc;
+    DeserializationError err = deserializeJson(doc, line);
 
-    if (cmd == "1:STOP_LASER") {
-      running = false;
-      RS485.println("FROM:1:STOPPED");
+    if (!err) {
 
-      // IMPORTANT: ensure laser OFF when stopped
-      digitalWrite(LASER_PIN, LOW);
+      int id = doc["id"] | 0;
+      const char* cmd = doc["cmd"];
+
+      if (id == DEVICE_ID && cmd != nullptr) {
+
+        if (strcmp(cmd, "calibrate_laser") == 0) {
+          calibrate();
+          running = false;
+        }
+
+        if (strcmp(cmd, "start_laser") == 0) {
+          running = true;
+          sendEvent("running", 1);
+        }
+
+        if (strcmp(cmd, "stop_laser") == 0) {
+          running = false;
+          digitalWrite(LASER_PIN, LOW);
+          sendEvent("running", 0);
+        }
+      }
     }
   }
 
-  
+  //loop
   if (!running) {
     digitalWrite(LASER_PIN, LOW);
     delay(50);
+    return;
   }
-  else{
-    bool ok = beam();
-    digitalWrite(LASER_PIN, HIGH);
-    digitalWrite(LED_BUILTIN, ok ? HIGH : LOW);
 
-    RS485.print("FROM:1:BEAM:");
-    RS485.println(ok);
+  bool ok = beam();
 
-    delay(100);
-  }
+  digitalWrite(LASER_PIN, HIGH);
+  digitalWrite(LED_BUILTIN, ok ? HIGH : LOW);
+
+  sendEvent("beam", ok ? 1 : 0);
+
+  delay(100);
 }
